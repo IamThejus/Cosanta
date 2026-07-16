@@ -6,7 +6,7 @@ Groq.
 
 ```
 Microphone
-  → Porcupine wake word      (wakeword.py)
+  → OpenWakeWord             (wakeword.py)
   → Record speech            (audio.py)
   → Faster Whisper (STT)     (speech_to_text.py)
   → Groq LLM                 (llm.py)
@@ -26,19 +26,23 @@ together in `main.py`.
 | `settings.py`        | Configuration only (env-driven, immutable dataclass).      |
 | `errors.py`          | Shared exception hierarchy (`CosantaError` and friends).      |
 | `audio.py`           | Mic capture (single stream owner) + WAV I/O + playback.    |
-| `wakeword.py`        | Porcupine wake-word detection.                             |
+| `wakeword.py`        | `WakeWordEngine` interface + `OpenWakeWordEngine`.         |
 | `speech_to_text.py`  | Faster Whisper transcription.                              |
 | `llm.py`             | `BaseLLM` provider interface + `GroqLLM`.                  |
 | `tts.py`             | Piper synthesis + playback (via injected player).          |
 | `conversation.py`    | Orchestrates the loop; owns history; per-turn recovery.    |
 | `main.py`            | Logging, wiring, graceful shutdown.                        |
 
-Two decisions worth calling out:
+Three decisions worth calling out:
 
 - **One microphone owner.** `AudioRecorder` opens a single PortAudio stream and
   both the wake-word loop and speech capture read frames from it. On Android,
   opening the mic from two places causes contention; sharing one stream avoids
-  it. Porcupine dictates the frame size, so the recorder is sized to match.
+  it. The frame size (1280 samples = OpenWakeWord's 80 ms hop) sizes the stream.
+- **Wake-word engine behind an interface.** `conversation.py` depends only on
+  the abstract `WakeWordEngine` (`start` / `stop` / `wait_for_wake_word`), never
+  on a concrete engine. `OpenWakeWordEngine` is the shipped implementation;
+  swapping it out touches only `wakeword.py` and the wiring in `main.py`.
 - **Provider interface for the LLM.** `conversation.py` only knows `BaseLLM`.
   Adding Ollama/OpenAI later is a new subclass in `llm.py` plus one line in
   `build_llm()` — no orchestration changes.
@@ -64,13 +68,15 @@ pip install -r requirements.txt
 ### Keys and models
 
 1. `cp .env.example .env` and fill in `GROQ_API_KEY`
-   (https://console.groq.com/) and `PORCUPINE_ACCESS_KEY`
-   (https://console.picovoice.ai/).
+   (https://console.groq.com/). No wake-word account or key is needed —
+   OpenWakeWord is fully open-source.
 2. Download a Piper voice into `voices/` from
    https://huggingface.co/rhasspy/piper-voices (grab both the `.onnx` and the
    `.onnx.json`) and set `COSANTA_PIPER_VOICE`.
-3. (Optional) Train a custom `cosanta` wake word in the Picovoice console, drop the
-   `.ppn` into `models/`, and set `COSANTA_WAKEWORD_PATH`.
+3. Pick a wake word with `COSANTA_WAKEWORD_MODEL` — a pretrained name
+   (`hey_jarvis` by default; also `alexa`, `hey_mycroft`, `hey_rhasspy`) or a
+   path to your own `.onnx`/`.tflite` model in `models/`. Pretrained models are
+   downloaded automatically on first run.
 
 ## Run
 
@@ -78,7 +84,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Say the wake word ("porcupine" by default), speak your request, and Cosanta
+Say the wake word ("hey jarvis" by default), speak your request, and Cosanta
 replies through the speaker. Press **Ctrl+C** to stop.
 
 ## Extending later

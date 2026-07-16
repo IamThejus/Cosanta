@@ -97,7 +97,7 @@ class AudioRecorder:
     def read(self, num_frames: int | None = None) -> np.ndarray:
         """Read exactly ``num_frames`` samples as an ``int16`` numpy array.
 
-        Defaults to ``frame_length`` samples, which is what Porcupine expects.
+        Defaults to ``frame_length`` samples, the wake-word engine's hop size.
         """
         if self._stream is None:
             raise AudioError("Recorder is not open; use it as a context manager.")

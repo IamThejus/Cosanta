@@ -22,7 +22,7 @@ class AudioError(CosantaError):
 
 
 class WakeWordError(CosantaError):
-    """Raised when Porcupine cannot be initialised or fails at runtime."""
+    """Raised when the wake-word engine cannot be initialised or fails at runtime."""
 
 
 class TranscriptionError(CosantaError):

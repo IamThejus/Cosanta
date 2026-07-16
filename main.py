@@ -26,7 +26,7 @@ from llm import build_llm
 from settings import Settings
 from speech_to_text import Transcriber
 from tts import PiperTTS
-from wakeword import WakeWordDetector
+from wakeword import OpenWakeWordEngine
 
 
 def configure_logging(settings: Settings) -> None:
@@ -52,16 +52,17 @@ def configure_logging(settings: Settings) -> None:
 def build_manager(settings: Settings) -> ConversationManager:
     """Construct every component and wire them into a ConversationManager.
 
-    Ordering matters: Porcupine dictates the audio frame length, so we create
-    the detector first and size the recorder to match.
+    Ordering matters: the microphone frame size is fixed by OpenWakeWord's
+    native hop (``wakeword_frame_length``), so we build the shared recorder
+    first and then hand it to the wake-word engine to read from.
     """
     log = logging.getLogger("cosanta.main")
 
-    log.info("Initialising wake-word engine...")
-    wakeword = WakeWordDetector(settings)
-
     log.info("Initialising microphone...")
-    recorder = AudioRecorder(settings, frame_length=wakeword.frame_length)
+    recorder = AudioRecorder(settings, frame_length=settings.wakeword_frame_length)
+
+    log.info("Initialising wake-word engine...")
+    wakeword = OpenWakeWordEngine(settings, recorder)
 
     log.info("Initialising speech-to-text...")
     transcriber = Transcriber(settings)

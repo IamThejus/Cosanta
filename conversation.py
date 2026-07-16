@@ -29,7 +29,7 @@ from llm import BaseLLM, Message
 from settings import Settings
 from speech_to_text import Transcriber
 from tts import PiperTTS
-from wakeword import WakeWordDetector
+from wakeword import WakeWordEngine
 
 logger = logging.getLogger("cosanta.conversation")
 
@@ -41,7 +41,7 @@ class ConversationManager:
         self,
         settings: Settings,
         recorder: AudioRecorder,
-        wakeword: WakeWordDetector,
+        wakeword: WakeWordEngine,
         transcriber: Transcriber,
         llm: BaseLLM,
         tts: PiperTTS,
@@ -63,6 +63,8 @@ class ConversationManager:
     def stop(self) -> None:
         """Request a graceful shutdown (safe to call from a signal handler)."""
         self._stop.set()
+        # Unblock the wake-word engine if it is mid-listen.
+        self._wakeword.stop()
 
     # -- history ------------------------------------------------------------ #
     def _append(self, role: str, content: str) -> None:
@@ -119,23 +121,24 @@ class ConversationManager:
         """Open resources, run the loop, and always release them.
 
         The recorder owns the microphone for the whole session, so it is opened
-        once here and shared between wake-word listening and speech capture.
-        Porcupine's native handle is released on exit.
+        once here and shared between wake-word listening and speech capture. The
+        wake-word engine is loaded up front so a bad model fails fast.
         """
         try:
+            self._wakeword.start()
             with self._recorder:
                 self.run_forever()
         finally:
-            self._wakeword.close()
+            self._wakeword.stop()
 
     def run_forever(self) -> None:
         """Run the pipeline until :meth:`stop` is called or Ctrl+C is pressed."""
         logger.info("Cosanta is online. Say the wake word to begin.")
         while not self._stop.is_set():
             try:
-                detected = self._wakeword.listen(self._recorder, self._stop)
+                detected = self._wakeword.wait_for_wake_word()
                 if not detected:
-                    break  # stop_event was set during listening
+                    break  # stop() was called during listening
                 self._handle_turn()
             except WakeWordError as exc:
                 # Wake-word engine failures are not per-turn recoverable.

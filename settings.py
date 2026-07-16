@@ -70,16 +70,21 @@ class Settings:
 
     # -- Credentials -------------------------------------------------------- #
     groq_api_key: str = ""
-    porcupine_access_key: str = ""
 
-    # -- Wake word (Porcupine) --------------------------------------------- #
-    # If ``wakeword_keyword_path`` points at a ``.ppn`` file it is used;
-    # otherwise ``wakeword_builtin`` selects one of Porcupine's built-in words
-    # (e.g. "porcupine", "jarvis", "computer").
-    wakeword_keyword_path: str = ""
-    wakeword_builtin: str = "porcupine"
-    wakeword_sensitivity: float = 0.6
-    wakeword_model_path: str = ""  # optional custom Porcupine model (.pv)
+    # -- Wake word (OpenWakeWord) ------------------------------------------ #
+    # ``wakeword_model`` is either a pretrained model name ("hey_jarvis",
+    # "alexa", "hey_mycroft", "hey_rhasspy", ...) or a path to a custom
+    # ``.onnx``/``.tflite`` model placed in ``models/``.
+    wakeword_model: str = "hey_jarvis"
+    # Detection fires when a model score meets or exceeds this threshold (0-1).
+    # Raise it to reduce false triggers; lower it if the word is missed.
+    wakeword_threshold: float = 0.5
+    # "onnx" has broad aarch64/Termux support and shares ONNX Runtime with
+    # Piper; "tflite" is the alternative if you prefer tflite_runtime.
+    wakeword_inference_framework: str = "onnx"
+    # Samples fed to the model per step. 1280 = 80 ms at 16 kHz, OpenWakeWord's
+    # native hop size. This also sizes the shared microphone frame.
+    wakeword_frame_length: int = 1280
 
     # -- Speech-to-text (Faster Whisper) ----------------------------------- #
     whisper_model: str = "base.en"
@@ -110,7 +115,7 @@ class Settings:
     piper_noise_w: float = 0.8
 
     # -- Audio -------------------------------------------------------------- #
-    sample_rate: int = 16000            # required by Porcupine & Whisper
+    sample_rate: int = 16000            # required by OpenWakeWord & Whisper
     channels: int = 1
     # Speech recording: stop after this much trailing silence, but never record
     # longer than ``record_max_seconds`` or shorter than ``record_min_seconds``.
@@ -146,11 +151,12 @@ class Settings:
 
         return cls(
             groq_api_key=os.getenv("GROQ_API_KEY", ""),
-            porcupine_access_key=os.getenv("PORCUPINE_ACCESS_KEY", ""),
-            wakeword_keyword_path=env("COSANTA_WAKEWORD_PATH", ""),
-            wakeword_builtin=env("COSANTA_WAKEWORD_BUILTIN", cls.wakeword_builtin),
-            wakeword_sensitivity=float(
-                env("COSANTA_WAKEWORD_SENSITIVITY", str(cls.wakeword_sensitivity))
+            wakeword_model=env("COSANTA_WAKEWORD_MODEL", cls.wakeword_model),
+            wakeword_threshold=float(
+                env("COSANTA_WAKEWORD_THRESHOLD", str(cls.wakeword_threshold))
+            ),
+            wakeword_inference_framework=env(
+                "COSANTA_WAKEWORD_FRAMEWORK", cls.wakeword_inference_framework
             ),
             whisper_model=env("COSANTA_WHISPER_MODEL", cls.whisper_model),
             whisper_device=env("COSANTA_WHISPER_DEVICE", cls.whisper_device),

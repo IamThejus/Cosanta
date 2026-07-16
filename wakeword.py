@@ -1,19 +1,37 @@
-"""Wake-word detection using Picovoice Porcupine.
+"""Wake-word detection for Cosanta.
 
-Single responsibility: turn a stream of microphone frames into a "wake word
-detected" event. It knows nothing about recording speech, transcription, or the
-LLM. It reads frames from an :class:`audio.AudioRecorder` so the microphone is
-owned in exactly one place.
+The rest of the application depends only on the abstract :class:`WakeWordEngine`
+interface — it never imports a concrete engine directly. This is what lets us
+swap Porcupine out for OpenWakeWord (and, later, anything else) without touching
+``conversation.py``.
 
-Porcupine dictates the audio format: 16 kHz, 16-bit mono, and a fixed frame
-length (``porcupine.frame_length``, typically 512 samples). We expose that
-frame length so the recorder can be configured to match.
+    class WakeWordEngine:
+        def start(self):              # load the model / acquire resources
+        def stop(self):               # signal the listen loop to stop
+        def wait_for_wake_word(self): # block until the wake word is heard
+
+Only :class:`OpenWakeWordEngine` is shipped here.
+
+Why OpenWakeWord
+----------------
+OpenWakeWord is fully open-source, needs no access key or cloud account, ships
+pretrained models ("hey_jarvis", "alexa", ...), and runs its inference through
+ONNX Runtime — which already ships in this project for Piper and has good
+aarch64/Termux wheels. It works on raw 16 kHz int16 audio in 80 ms (1280-sample)
+chunks, so it slots straight into the existing shared microphone stream.
+
+Microphone ownership is unchanged: the engine does *not* open the mic itself. It
+reads frames from the shared :class:`audio.AudioRecorder` that ``main.py`` wires
+in, so there is still exactly one owner of the audio device.
 """
 
 from __future__ import annotations
 
+import abc
 import logging
+import os
 import threading
+from pathlib import Path
 
 from audio import AudioRecorder
 from errors import WakeWordError
@@ -22,92 +40,142 @@ from settings import Settings
 logger = logging.getLogger("cosanta.wakeword")
 
 try:
-    import pvporcupine
+    import openwakeword
+    from openwakeword.model import Model as _OWWModel
 except Exception:  # pragma: no cover - platform dependent
-    pvporcupine = None  # type: ignore[assignment]
+    openwakeword = None  # type: ignore[assignment]
+    _OWWModel = None  # type: ignore[assignment]
 
 
-class WakeWordDetector:
-    """Thin wrapper around a Porcupine handle."""
+class WakeWordEngine(abc.ABC):
+    """Abstract wake-word engine.
 
-    def __init__(self, settings: Settings) -> None:
-        if pvporcupine is None:
-            raise WakeWordError(
-                "pvporcupine is not installed. Run: pip install pvporcupine"
-            )
-        if not settings.porcupine_access_key:
-            raise WakeWordError(
-                "PORCUPINE_ACCESS_KEY is not set. Get a free key at "
-                "https://console.picovoice.ai/ and add it to your .env."
-            )
+    Implementations read audio from an injected recorder and block until their
+    configured wake word is detected. ``stop()`` provides cooperative,
+    thread-safe shutdown so a signal handler can unblock ``wait_for_wake_word``.
+    """
 
-        self._settings = settings
-        try:
-            self._porcupine = self._create_handle(settings)
-        except Exception as exc:
-            raise WakeWordError(f"Failed to initialise Porcupine: {exc}") from exc
+    @abc.abstractmethod
+    def start(self) -> None:
+        """Load the model and prepare for listening. Idempotent."""
 
-        logger.info(
-            "Porcupine ready (frame_length=%d, sample_rate=%d)",
-            self._porcupine.frame_length,
-            self._porcupine.sample_rate,
-        )
+    @abc.abstractmethod
+    def stop(self) -> None:
+        """Ask any in-progress ``wait_for_wake_word`` call to return."""
 
-    @staticmethod
-    def _create_handle(settings: Settings):
-        """Build a Porcupine handle from either a custom or built-in keyword."""
-        kwargs: dict = {
-            "access_key": settings.porcupine_access_key,
-            "sensitivities": [settings.wakeword_sensitivity],
-        }
-        if settings.wakeword_keyword_path:
-            kwargs["keyword_paths"] = [settings.wakeword_keyword_path]
-        else:
-            kwargs["keywords"] = [settings.wakeword_builtin]
-        if settings.wakeword_model_path:
-            kwargs["model_path"] = settings.wakeword_model_path
-        return pvporcupine.create(**kwargs)
-
-    # -- properties used to configure the recorder -------------------------- #
-    @property
-    def frame_length(self) -> int:
-        return self._porcupine.frame_length
-
-    @property
-    def sample_rate(self) -> int:
-        return self._porcupine.sample_rate
-
-    # -- detection ---------------------------------------------------------- #
-    def process(self, frame) -> int:
-        """Process one frame; returns the keyword index or -1 if none."""
-        return self._porcupine.process(frame)
-
-    def listen(
-        self,
-        recorder: AudioRecorder,
-        stop_event: threading.Event | None = None,
-    ) -> bool:
+    @abc.abstractmethod
+    def wait_for_wake_word(self) -> bool:
         """Block until the wake word is heard.
 
-        Returns ``True`` when detected, or ``False`` if ``stop_event`` is set
+        Returns ``True`` when detected, or ``False`` if :meth:`stop` was called
         first (used for graceful shutdown). Raises :class:`WakeWordError` on an
         unrecoverable engine failure.
         """
+
+
+class OpenWakeWordEngine(WakeWordEngine):
+    """Wake-word engine backed by OpenWakeWord."""
+
+    def __init__(self, settings: Settings, recorder: AudioRecorder) -> None:
+        self._settings = settings
+        self._recorder = recorder
+        self._model = None  # created lazily in start()
+        self._stopped = threading.Event()
+
+    # -- helpers ------------------------------------------------------------ #
+    @staticmethod
+    def _looks_like_path(spec: str) -> bool:
+        """Distinguish a custom model file from a pretrained model name."""
+        return spec.endswith((".onnx", ".tflite")) or os.sep in spec
+
+    # -- lifecycle ---------------------------------------------------------- #
+    def start(self) -> None:
+        if self._model is not None:
+            return
+        if openwakeword is None or _OWWModel is None:
+            raise WakeWordError(
+                "openwakeword is not installed. Run: pip install openwakeword"
+            )
+
+        s = self._settings
+        model_spec = s.wakeword_model
+        is_path = self._looks_like_path(model_spec)
+
+        # A missing *custom* model is a hard error; pretrained names are fetched
+        # on demand below.
+        if is_path and not Path(model_spec).exists():
+            raise WakeWordError(
+                f"Wake-word model not found: {model_spec!r}. Place your "
+                ".onnx/.tflite model in models/ and set COSANTA_WAKEWORD_MODEL."
+            )
+
+        logger.info("[WakeWord] Loading OpenWakeWord model '%s'...", model_spec)
+
+        # Ensure the shared feature extractors (and the pretrained model, if we
+        # were given a name) are present. This is a no-op once cached, so a
+        # download failure is only fatal if the files are genuinely missing.
+        try:
+            names = [] if is_path else [model_spec]
+            openwakeword.utils.download_models(model_names=names)
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.warning(
+                "[WakeWord] Could not download models (%s); assuming cached.", exc
+            )
+
+        try:
+            self._model = _OWWModel(
+                wakeword_models=[model_spec],
+                inference_framework=s.wakeword_inference_framework,
+            )
+        except Exception as exc:
+            raise WakeWordError(
+                f"Failed to initialise OpenWakeWord: {exc}"
+            ) from exc
+
+        self._stopped.clear()
+        logger.info(
+            "[WakeWord] Ready (framework=%s, threshold=%.2f, frame=%d).",
+            s.wakeword_inference_framework,
+            s.wakeword_threshold,
+            s.wakeword_frame_length,
+        )
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    # -- detection ---------------------------------------------------------- #
+    def wait_for_wake_word(self) -> bool:
+        if self._model is None:
+            self.start()
+
+        # Reset the streaming buffers so audio captured during the previous turn
+        # (e.g. the tail of the user's speech) cannot trigger a false detection.
+        reset = getattr(self._model, "reset", None)
+        if callable(reset):
+            reset()
+
+        s = self._settings
+        frame_length = s.wakeword_frame_length
+        threshold = s.wakeword_threshold
+
         logger.info("[WakeWord] Listening...")
-        while stop_event is None or not stop_event.is_set():
+        while not self._stopped.is_set():
             try:
-                frame = recorder.read(self.frame_length)
-                if self._porcupine.process(frame) >= 0:
-                    logger.info("[WakeWord] Detected")
-                    return True
+                frame = self._recorder.read(frame_length)
             except WakeWordError:
                 raise
-            except Exception as exc:  # pragma: no cover - hardware dependent
-                raise WakeWordError(f"Wake-word processing failed: {exc}") from exc
-        return False
+            except Exception as exc:
+                # Audio-stream hiccups are recoverable; surface as WakeWordError
+                # only if the read cannot be retried by the caller.
+                raise WakeWordError(f"Audio stream failure: {exc}") from exc
 
-    def close(self) -> None:
-        try:
-            self._porcupine.delete()
-        except Exception:  # pragma: no cover
-            pass
+            try:
+                scores = self._model.predict(frame)
+            except Exception as exc:  # pragma: no cover - runtime dependent
+                raise WakeWordError(f"OpenWakeWord inference failed: {exc}") from exc
+
+            if scores and max(scores.values()) >= threshold:
+                logger.info("[WakeWord] Wake word detected.")
+                return True
+
+        return False
