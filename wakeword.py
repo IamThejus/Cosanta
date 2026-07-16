@@ -42,9 +42,14 @@ logger = logging.getLogger("cosanta.wakeword")
 try:
     import openwakeword
     from openwakeword.model import Model as _OWWModel
-except Exception:  # pragma: no cover - platform dependent
+
+    _OWW_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - platform dependent
+    # Capture the *real* cause: a missing sub-dependency (onnxruntime, scipy,
+    # numpy) raises here too, and reporting it beats a generic "not installed".
     openwakeword = None  # type: ignore[assignment]
     _OWWModel = None  # type: ignore[assignment]
+    _OWW_IMPORT_ERROR = exc
 
 
 class WakeWordEngine(abc.ABC):
@@ -94,7 +99,10 @@ class OpenWakeWordEngine(WakeWordEngine):
             return
         if openwakeword is None or _OWWModel is None:
             raise WakeWordError(
-                "openwakeword is not installed. Run: pip install openwakeword"
+                f"OpenWakeWord could not be imported ({_OWW_IMPORT_ERROR}). "
+                "Install it with: pip install --no-deps openwakeword — and make "
+                "sure python-onnxruntime, python-numpy and python-scipy are "
+                "installed from pkg (see DEPENDENCIES.md)."
             )
 
         s = self._settings
