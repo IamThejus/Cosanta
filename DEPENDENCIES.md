@@ -33,7 +33,8 @@ Enable the Termux User Repository first: `pkg install tur-repo`.
 | `python` | The interpreter. | — |
 | `python-numpy` | Array math for audio frames / STT input. | Prebuilt; avoids a meson + BLAS build. |
 | `python-scipy` | OpenWakeWord's signal-processing utilities import it. | Prebuilt; avoids a meson + Fortran build. |
-| `python-onnxruntime` | Inference backend that runs OpenWakeWord's ONNX models. | Prebuilt; the pip wheel doesn't exist for cp314/aarch64. |
+| `python-scikit-learn` | OpenWakeWord's `__init__` eagerly imports `sklearn` (training code) even for inference-only use, so the package won't import without it. | Prebuilt; avoids a heavy Cython/OpenMP build. |
+| `python-onnxruntime` | Inference backend that runs OpenWakeWord's ONNX models. | Prebuilt; the pip wheel doesn't exist for cp314/aarch64. On Android it prints a harmless "Unsupported platform" warning but runs fine on CPU. |
 | `python-cffi` | `sounddevice` binds to PortAudio through CFFI. | Prebuilt; avoids compiling CFFI. |
 | `portaudio` | Native audio library `sounddevice` drives for mic capture. | System library, only available via pkg. |
 | `termux-api` | Provides `termux-tts-speak` (Android TTS) and `termux-microphone-record` (permission grant). | System bridge to Android; not a pip package. |

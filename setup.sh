@@ -31,7 +31,8 @@ PKGS=(
   python            # interpreter
   python-numpy      # arrays (avoids meson/BLAS build)
   python-scipy      # OpenWakeWord signal utils (avoids meson/Fortran build)
-  python-onnxruntime  # OpenWakeWord inference backend (avoids huge C++ build)
+  python-scikit-learn  # OpenWakeWord's __init__ imports sklearn (avoids Cython build)
+  python-onnxruntime   # OpenWakeWord inference backend (avoids huge C++ build)
   python-cffi       # sounddevice needs CFFI (avoids compiling it)
   portaudio         # native audio lib for sounddevice mic capture
   termux-api        # termux-tts-speak (Android TTS) + microphone permission
@@ -47,6 +48,7 @@ pkg install -y "${PKGS[@]}"
 info "2/9  Verifying system packages"
 python -c "import numpy"       && ok "python-numpy"       || bad "python-numpy"
 python -c "import scipy"       && ok "python-scipy"       || bad "python-scipy"
+python -c "import sklearn"     && ok "python-scikit-learn" || bad "python-scikit-learn"
 python -c "import onnxruntime" && ok "python-onnxruntime" || bad "python-onnxruntime"
 command -v termux-tts-speak >/dev/null && ok "termux-api" || bad "termux-api (install the Termux:API app too)"
 
