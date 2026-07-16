@@ -1,32 +1,42 @@
 """Language-model providers for Cosanta.
 
-The pipeline talks to an abstract :class:`BaseLLM` interface, and this module
-ships one concrete implementation, :class:`GroqLLM`. Adding a new backend later
-(Ollama for local inference, OpenAI, Anthropic, ...) is just a new subclass —
-``conversation.py`` never has to change. That is the whole point of keeping a
-provider interface here.
+The pipeline talks to an abstract :class:`BaseLLM`; this module ships
+:class:`GroqLLM`, a lightweight client that speaks Groq's OpenAI-compatible REST
+API **directly over HTTPS with ``requests``**.
 
-The provider is stateless with respect to conversation history: callers pass the
-full message list on every call. History management (trimming, persistence)
-lives in ``conversation.py`` so that memory/history features can be added later
-without touching provider code.
+Why not the official ``groq`` SDK
+---------------------------------
+The SDK depends on pydantic v2, whose ``pydantic-core`` is a Rust extension
+built with maturin. On Termux with Python 3.14 there is no matching wheel, so
+pip tries to compile Rust and fails. ``requests`` (and its deps) are pure
+Python, install cleanly, and the REST surface we need is tiny — so we implement
+it ourselves. This keeps installation reliable, which is the project's top
+priority.
+
+Adding another backend later (Ollama, OpenAI, ...) is just a new subclass —
+``conversation.py`` only ever sees :class:`BaseLLM`.
 """
 
 from __future__ import annotations
 
 import abc
+import json
 import logging
 import time
-from typing import Sequence
+from typing import Iterator, Sequence
+
+import requests
 
 from errors import ConfigError, LLMError
 from settings import Settings
 
 logger = logging.getLogger("cosanta.llm")
 
-# A chat message is a plain dict so it is trivially JSON-serialisable and works
-# with every provider SDK unchanged.
+# A chat message is a plain dict so it is trivially JSON-serialisable.
 Message = dict[str, str]
+
+# HTTP statuses worth retrying: rate-limit + transient server/gateway errors.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class BaseLLM(abc.ABC):
@@ -41,13 +51,13 @@ class BaseLLM(abc.ABC):
 
         ``messages`` follows the OpenAI/Groq convention: a list of
         ``{"role": "system"|"user"|"assistant", "content": str}`` dicts.
-        Implementations should raise :class:`LLMError` on failure.
+        Implementations raise :class:`LLMError` on failure.
         """
         raise NotImplementedError
 
 
 class GroqLLM(BaseLLM):
-    """Groq chat-completions provider using the official ``groq`` SDK."""
+    """Groq chat-completions over REST using ``requests`` (no SDK)."""
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
@@ -56,54 +66,109 @@ class GroqLLM(BaseLLM):
                 "GROQ_API_KEY is not set. Get a key at https://console.groq.com/ "
                 "and add it to your .env."
             )
-        try:
-            from groq import Groq
-        except Exception as exc:  # pragma: no cover - optional dependency
-            raise ConfigError(
-                "The 'groq' package is not installed. Run: pip install groq"
-            ) from exc
-
-        self._client = Groq(
-            api_key=settings.groq_api_key,
-            timeout=settings.llm_timeout,
-            max_retries=0,  # we implement our own retry/backoff below
+        self._url = settings.groq_base_url.rstrip("/") + "/chat/completions"
+        # Reuse one TCP connection across turns (keep-alive) for lower latency.
+        self._session = requests.Session()
+        self._session.headers.update(
+            {
+                "Authorization": f"Bearer {settings.groq_api_key}",
+                "Content-Type": "application/json",
+            }
         )
 
+    # -- public API --------------------------------------------------------- #
     def generate(self, messages: Sequence[Message]) -> str:
         s = self._settings
-        last_exc: Exception | None = None
+        if s.llm_stream:
+            return "".join(self.stream_generate(messages)).strip()
 
-        # Retry transient failures (network blips, rate limits) with a small
-        # linear backoff. Non-recoverable errors surface after the last attempt.
+        payload = self._payload(messages, stream=False)
+        resp = self._request_with_retry(payload, stream=False)
+        try:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"] or ""
+        except (ValueError, KeyError, IndexError) as exc:
+            raise LLMError(f"Malformed Groq response: {exc}") from exc
+        logger.info("[Groq] Response received (%d chars)", len(content))
+        return content.strip()
+
+    def stream_generate(self, messages: Sequence[Message]) -> Iterator[str]:
+        """Yield reply text incrementally from the SSE stream.
+
+        The pipeline currently buffers the whole reply before speaking, but this
+        generator is the seam for future sentence-by-sentence TTS.
+        """
+        payload = self._payload(messages, stream=True)
+        resp = self._request_with_retry(payload, stream=True)
+        logger.info("[Groq] Streaming response...")
+        try:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    delta = chunk["choices"][0]["delta"].get("content")
+                except (ValueError, KeyError, IndexError):
+                    continue
+                if delta:
+                    yield delta
+        except requests.RequestException as exc:
+            raise LLMError(f"Groq stream interrupted: {exc}") from exc
+        finally:
+            resp.close()
+
+    # -- internals ---------------------------------------------------------- #
+    def _payload(self, messages: Sequence[Message], *, stream: bool) -> dict:
+        s = self._settings
+        return {
+            "model": s.groq_model,
+            "messages": list(messages),
+            "temperature": s.llm_temperature,
+            "max_tokens": s.llm_max_tokens,
+            "stream": stream,
+        }
+
+    def _request_with_retry(self, payload: dict, *, stream: bool) -> requests.Response:
+        """POST with linear backoff on transient network/HTTP failures."""
+        s = self._settings
+        last_error: str | None = None
+
         for attempt in range(1, s.llm_max_retries + 2):
             try:
                 logger.info("[Groq] Sending request (attempt %d)...", attempt)
-                completion = self._client.chat.completions.create(
-                    model=s.groq_model,
-                    messages=list(messages),
-                    temperature=s.llm_temperature,
-                    max_tokens=s.llm_max_tokens,
+                resp = self._session.post(
+                    self._url,
+                    json=payload,
+                    timeout=s.llm_timeout,
+                    stream=stream,
                 )
-                content = (completion.choices[0].message.content or "").strip()
-                logger.info("[Groq] Response received (%d chars)", len(content))
-                return content
-            except Exception as exc:  # SDK raises various APIError subclasses
-                last_exc = exc
-                logger.warning("[Groq] Request failed: %s", exc)
-                if attempt <= s.llm_max_retries:
-                    time.sleep(attempt)  # 1s, 2s, ...
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = f"network error: {exc}"  # transient → retry
+            else:
+                if resp.status_code == 200:
+                    return resp
+                body = resp.text[:200]
+                if resp.status_code in _RETRYABLE_STATUS:
+                    last_error = f"HTTP {resp.status_code}: {body}"
+                    resp.close()
+                else:
+                    # Auth/quota/bad-request errors will not fix themselves.
+                    resp.close()
+                    raise LLMError(f"Groq HTTP {resp.status_code}: {body}")
 
-        raise LLMError(f"Groq request failed after retries: {last_exc}") from last_exc
+            logger.warning("[Groq] Request failed (%s)", last_error)
+            if attempt <= s.llm_max_retries:
+                time.sleep(attempt)  # 1s, 2s, ...
+
+        raise LLMError(f"Groq request failed after retries: {last_error}")
 
 
 def build_llm(settings: Settings) -> BaseLLM:
-    """Factory that returns the configured provider.
-
-    Extend the mapping below as new providers are added.
-    """
-    providers = {
-        "groq": GroqLLM,
-    }
+    """Factory returning the configured provider. Extend as backends are added."""
+    providers = {"groq": GroqLLM}
     provider_cls = providers.get(settings.llm_provider.lower())
     if provider_cls is None:
         raise ConfigError(

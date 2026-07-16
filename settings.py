@@ -86,19 +86,26 @@ class Settings:
     # native hop size. This also sizes the shared microphone frame.
     wakeword_frame_length: int = 1280
 
-    # -- Speech-to-text (Faster Whisper) ----------------------------------- #
-    whisper_model: str = "base.en"
-    whisper_device: str = "cpu"          # "cpu" is the safe default on Termux
-    whisper_compute_type: str = "int8"   # int8 keeps memory/CPU low on ARM
+    # -- Speech-to-text (whisper.cpp) -------------------------------------- #
+    # whisper.cpp is built once from pkg/source (no ctranslate2, no Rust) and
+    # invoked as a subprocess, so Python needs zero native STT dependencies.
+    whisper_binary: str = "whisper-cli"   # falls back to "main" if not found
+    whisper_model_path: str = str(MODELS_DIR / "ggml-base.en.bin")
     whisper_language: str = "en"
+    whisper_threads: int = 4              # SD636 has 8 cores; 4 keeps it cool
+    whisper_timeout: float = 120.0
 
-    # -- LLM (Groq) --------------------------------------------------------- #
+    # -- LLM (Groq REST) ---------------------------------------------------- #
+    # No official SDK (it needs pydantic-core / Rust). We speak the OpenAI-
+    # compatible REST API directly with `requests`.
     llm_provider: str = "groq"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "llama-3.3-70b-versatile"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 512
     llm_timeout: float = 30.0
     llm_max_retries: int = 2
+    llm_stream: bool = False              # accumulate SSE deltas when True
     system_prompt: str = (
         "You are Cosanta, a concise and helpful voice assistant running on a "
         "phone. Keep answers short and natural because they will be spoken "
@@ -108,8 +115,18 @@ class Settings:
     # dropped to bound memory and token usage.
     history_max_turns: int = 8
 
-    # -- Text-to-speech (Piper) -------------------------------------------- #
-    piper_voice_path: str = ""  # path to a Piper ``.onnx`` voice model
+    # -- Text-to-speech ----------------------------------------------------- #
+    # "android" uses the phone's built-in TTS via termux-tts-speak (no models,
+    # no native build). "piper" keeps the old Piper engine for swap-back.
+    tts_backend: str = "android"
+    # Android TTS (termux-tts-speak) options:
+    android_tts_engine: str = ""          # "" = system default engine
+    android_tts_language: str = ""        # "" = system default (e.g. "en-US")
+    android_tts_pitch: float = 1.0
+    android_tts_rate: float = 1.0
+    android_tts_stream: str = "NOTIFICATION"  # Android audio stream
+    # Piper (only used when tts_backend == "piper"):
+    piper_voice_path: str = ""            # path to a Piper ``.onnx`` voice model
     piper_length_scale: float = 1.0
     piper_noise_scale: float = 0.667
     piper_noise_w: float = 0.8
@@ -158,13 +175,16 @@ class Settings:
             wakeword_inference_framework=env(
                 "COSANTA_WAKEWORD_FRAMEWORK", cls.wakeword_inference_framework
             ),
-            whisper_model=env("COSANTA_WHISPER_MODEL", cls.whisper_model),
-            whisper_device=env("COSANTA_WHISPER_DEVICE", cls.whisper_device),
-            whisper_compute_type=env(
-                "COSANTA_WHISPER_COMPUTE_TYPE", cls.whisper_compute_type
-            ),
+            whisper_binary=env("COSANTA_WHISPER_BINARY", cls.whisper_binary),
+            whisper_model_path=env("COSANTA_WHISPER_MODEL", cls.whisper_model_path),
             whisper_language=env("COSANTA_WHISPER_LANGUAGE", cls.whisper_language),
+            whisper_threads=int(env("COSANTA_WHISPER_THREADS", str(cls.whisper_threads))),
+            groq_base_url=env("COSANTA_GROQ_BASE_URL", cls.groq_base_url),
             groq_model=env("COSANTA_GROQ_MODEL", cls.groq_model),
+            llm_stream=_get_bool("COSANTA_LLM_STREAM", cls.llm_stream),
+            tts_backend=env("COSANTA_TTS_BACKEND", cls.tts_backend),
+            android_tts_language=env("COSANTA_TTS_LANGUAGE", cls.android_tts_language),
+            android_tts_engine=env("COSANTA_TTS_ENGINE", cls.android_tts_engine),
             piper_voice_path=env("COSANTA_PIPER_VOICE", ""),
             log_level=env("COSANTA_LOG_LEVEL", cls.log_level),
             log_to_file=_get_bool("COSANTA_LOG_TO_FILE", cls.log_to_file),

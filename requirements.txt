@@ -1,15 +1,21 @@
-# Core Cosanta dependencies (Android / Termux, aarch64, Python 3.11+)
+# Cosanta — pip dependencies (Android / Termux, aarch64)
 #
-# Install order matters on Termux — see README.md for the system packages
-# (portaudio, etc.) you must install with `pkg` first.
+# These are the ONLY packages that should be installed with pip. They are all
+# pure Python and compile nothing. Everything with native code (numpy, scipy,
+# onnxruntime, cffi, portaudio, whisper.cpp, Android TTS) comes from `pkg` —
+# see DEPENDENCIES.md and run ./setup.sh, which installs those first.
+#
+# NOTE: openwakeword is installed SEPARATELY with `--no-deps` (setup.sh does
+# this) so pip does not drag in tflite-runtime / scipy / onnxruntime builds.
+# It is intentionally NOT listed here.
 
-numpy>=1.24
-sounddevice>=0.4.6      # PortAudio microphone capture + playback
-openwakeword>=0.6.0     # wake-word detection (open-source, no access key)
-onnxruntime>=1.16       # inference backend for OpenWakeWord (shared with Piper)
-faster-whisper>=1.0     # speech-to-text (pulls in ctranslate2)
-groq>=0.11              # Groq LLM SDK
-piper-tts>=1.2          # text-to-speech
-
-# Optional: nicer .env loading (a minimal fallback parser is built in).
-python-dotenv>=1.0
+sounddevice>=0.4.6   # Mic capture over PortAudio. Pure Python; uses the pkg
+                     #   'python-cffi' + 'portaudio'. Only lib that streams raw
+                     #   PCM frames, which OpenWakeWord needs (termux-mic-record
+                     #   writes files and cannot stream).
+requests>=2.31       # Groq REST client + model downloads. Pure Python. Chosen
+                     #   over the groq SDK, which needs pydantic-core (Rust).
+tqdm>=4.65           # Progress bars for OpenWakeWord's model downloads. Pure
+                     #   Python; an OpenWakeWord runtime import.
+python-dotenv>=1.0   # Optional .env loader (a minimal fallback parser is built
+                     #   in). Pure Python.

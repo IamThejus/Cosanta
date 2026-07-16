@@ -25,7 +25,7 @@ from errors import CosantaError
 from llm import build_llm
 from settings import Settings
 from speech_to_text import Transcriber
-from tts import PiperTTS
+from tts import build_tts
 from wakeword import OpenWakeWordEngine
 
 
@@ -70,9 +70,9 @@ def build_manager(settings: Settings) -> ConversationManager:
     log.info("Initialising LLM provider (%s)...", settings.llm_provider)
     llm = build_llm(settings)
 
-    log.info("Initialising text-to-speech...")
-    player = AudioPlayer(settings)
-    tts = PiperTTS(settings, player)
+    log.info("Initialising text-to-speech (%s)...", settings.tts_backend)
+    player = AudioPlayer(settings)  # used only by the Piper backend
+    tts = build_tts(settings, player)
 
     return ConversationManager(
         settings=settings,

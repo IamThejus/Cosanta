@@ -8,12 +8,16 @@ Groq.
 Microphone
   → OpenWakeWord             (wakeword.py)
   → Record speech            (audio.py)
-  → Faster Whisper (STT)     (speech_to_text.py)
-  → Groq LLM                 (llm.py)
-  → Piper (TTS)              (tts.py)
-  → Speaker                  (audio.py)
+  → whisper.cpp (STT)        (speech_to_text.py)
+  → Groq LLM (REST)          (llm.py)
+  → Android TTS              (tts.py)
+  → Speaker                  (Android)
   → back to wake word        (conversation.py)
 ```
+
+The stack is chosen for **reliable, near-compilation-free installation on
+Termux**. See [DEPENDENCIES.md](DEPENDENCIES.md) for the full rationale and the
+`pkg` vs `pip` split.
 
 ## Architecture
 
@@ -27,9 +31,9 @@ together in `main.py`.
 | `errors.py`          | Shared exception hierarchy (`CosantaError` and friends).      |
 | `audio.py`           | Mic capture (single stream owner) + WAV I/O + playback.    |
 | `wakeword.py`        | `WakeWordEngine` interface + `OpenWakeWordEngine`.         |
-| `speech_to_text.py`  | Faster Whisper transcription.                              |
-| `llm.py`             | `BaseLLM` provider interface + `GroqLLM`.                  |
-| `tts.py`             | Piper synthesis + playback (via injected player).          |
+| `speech_to_text.py`  | whisper.cpp transcription (subprocess).                    |
+| `llm.py`             | `BaseLLM` interface + `GroqLLM` (REST via `requests`).     |
+| `tts.py`             | `TextToSpeech` interface + `AndroidTTS` / `PiperTTS`.      |
 | `conversation.py`    | Orchestrates the loop; owns history; per-turn recovery.    |
 | `main.py`            | Logging, wiring, graceful shutdown.                        |
 
@@ -49,43 +53,41 @@ Three decisions worth calling out:
 
 ## Setup (Termux)
 
+**One command** does the whole install — system packages, Python env, pip
+packages, whisper.cpp + model, and verification of every stage:
+
 ```bash
-# System packages
-pkg update && pkg upgrade
-pkg install python portaudio git
-
-# Grant Termux mic access once (from termux-api)
-pkg install termux-api        # optional playback fallback
-
-# Python deps
-pip install -r requirements.txt
+cp .env.example .env      # then add your GROQ_API_KEY
+./setup.sh
 ```
 
-> Some wheels (`ctranslate2` for faster-whisper, `onnxruntime` for Piper) can be
-> slow or tricky to build on aarch64. Prefer small Whisper models
-> (`tiny.en`/`base.en`) and `compute_type=int8`.
+Prerequisites: a fresh **Termux** (from F-Droid) plus the **Termux:API app**
+(also F-Droid). The only key you need is a free Groq key from
+https://console.groq.com/. No wake-word account is required — OpenWakeWord is
+open-source, and its `hey_jarvis` model downloads automatically on first run.
 
-### Keys and models
+`setup.sh` follows the `pkg`-first / `pip`-for-pure-Python rule so it compiles
+almost nothing. For the manual step-by-step and the reasoning behind each
+dependency, see [DEPENDENCIES.md](DEPENDENCIES.md).
 
-1. `cp .env.example .env` and fill in `GROQ_API_KEY`
-   (https://console.groq.com/). No wake-word account or key is needed —
-   OpenWakeWord is fully open-source.
-2. Download a Piper voice into `voices/` from
-   https://huggingface.co/rhasspy/piper-voices (grab both the `.onnx` and the
-   `.onnx.json`) and set `COSANTA_PIPER_VOICE`.
-3. Pick a wake word with `COSANTA_WAKEWORD_MODEL` — a pretrained name
-   (`hey_jarvis` by default; also `alexa`, `hey_mycroft`, `hey_rhasspy`) or a
-   path to your own `.onnx`/`.tflite` model in `models/`. Pretrained models are
-   downloaded automatically on first run.
+### Optional configuration
+
+- **Wake word** — `COSANTA_WAKEWORD_MODEL`: a pretrained name (`hey_jarvis`,
+  `alexa`, `hey_mycroft`, `hey_rhasspy`) or a path to your own `.onnx` model.
+- **STT model** — the `base.en` GGML model is fetched by `setup.sh`; swap it via
+  `COSANTA_WHISPER_MODEL` (e.g. `models/ggml-tiny.en.bin` for less RAM/latency).
+- **TTS** — defaults to Android's built-in engine. Set `COSANTA_TTS_BACKEND=piper`
+  (plus `COSANTA_PIPER_VOICE`) to use Piper instead.
 
 ## Run
 
 ```bash
+source .venv/bin/activate
 python main.py
 ```
 
 Say the wake word ("hey jarvis" by default), speak your request, and Cosanta
-replies through the speaker. Press **Ctrl+C** to stop.
+answers through the phone's speaker. Press **Ctrl+C** to stop.
 
 ## Extending later
 

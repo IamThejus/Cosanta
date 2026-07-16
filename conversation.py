@@ -28,7 +28,7 @@ from errors import CosantaError, LLMError, TranscriptionError, TTSError, WakeWor
 from llm import BaseLLM, Message
 from settings import Settings
 from speech_to_text import Transcriber
-from tts import PiperTTS
+from tts import TextToSpeech
 from wakeword import WakeWordEngine
 
 logger = logging.getLogger("cosanta.conversation")
@@ -44,7 +44,7 @@ class ConversationManager:
         wakeword: WakeWordEngine,
         transcriber: Transcriber,
         llm: BaseLLM,
-        tts: PiperTTS,
+        tts: TextToSpeech,
     ) -> None:
         self._settings = settings
         self._recorder = recorder
