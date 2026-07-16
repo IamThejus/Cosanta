@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime artifacts
+logs/*.log
+
+# Downloaded models / voices (large binaries — fetch per README)
+models/*
+voices/*
+!models/.gitkeep
+!voices/.gitkeep
